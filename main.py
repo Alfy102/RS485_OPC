@@ -8,19 +8,15 @@ import sqlite3
 from io_layout_map import node_structure
 import collections
 import time
-from pymodbus.client.asynchronous.serial import (AsyncModbusSerialClient as ModbusClient)
+from pymodbus.client.sync import ModbusSerialClient as ModbusClient
 from pymodbus.client.asynchronous import schedulers
 from comm_protocol import serial_read_holding_registers
-import logging
-logging.basicConfig()
-log = logging.getLogger()
-log.setLevel(logging.DEBUG)
+from pymodbus.transaction import ModbusRtuFramer
 
 
 class OpcServerThread(object):
     
     def __init__(self,client,current_file_path,endpoint,server_refresh_rate,uri,parent=None,**kwargs):
-        self.client = client
         self.plc_address=0x01
         self.file_path = current_file_path
         self.server = Server()
@@ -32,7 +28,7 @@ class OpcServerThread(object):
         #delay of subscribtion time in ms. reducing this value will cause server lag.
         self.sub_time = 50
         self.hmi_sub = 10
-        asyncio.run(self.opc_server())
+        asyncio.run(self.opc_server(client))
 
 
 
@@ -83,11 +79,18 @@ class OpcServerThread(object):
             dbcur.close()
             return False
 
-    async def scan_loop_plc(self,io_dict):
+    async def scan_loop_plc(self,client,io_dict):
         lead_data = io_dict[list(io_dict.keys())[0]]
         lead_device = lead_data['name']
         device_size = len(io_dict)
-        current_relay_list = await serial_read_holding_registers(self.client,self.plc_address,lead_device,device_size)
+        #print(lead_device)
+        #print(device_size)
+        current_relay_list = serial_read_holding_registers(client,int(lead_device),device_size,self.plc_address)
+        #current_memory = client.read_holding_registers(lead_device, device_size, unit=self.plc_address)
+        #current_memory = client.read_holding_registers(16397, 6, unit=0x01)
+        #current_relay_list = current_memory.registers
+        
+        #print(current_relay_list.registers)
         i=0
         for key,value in io_dict.items():
             node_id = key
@@ -123,7 +126,7 @@ class OpcServerThread(object):
                                 await server_var.set_writable()
         conn.close()
 
-    async def opc_server(self):
+    async def opc_server(self,client):
 
         database_file = "variable_history.sqlite3"
         #Configure server to use sqlite as history database (default is a simple memory dict)
@@ -142,12 +145,11 @@ class OpcServerThread(object):
         
 
         plc_clock_dict = collections.OrderedDict(sorted(self.plc_clock_dict.items()))
-        print(plc_clock_dict)
         async with self.server:
             while True:
                 #tic = time.time()
                 await asyncio.sleep(self.server_refresh_rate)
-                await self.scan_loop_plc(plc_clock_dict)
+                await self.scan_loop_plc(client,plc_clock_dict)
                 #toc = time.time()
                 #print(f"{toc - tic- self.server_refresh_rate :.9f}")
 
@@ -156,11 +158,11 @@ def main():
 
     file_path = Path(__file__).parent.absolute()
     endpoint = "localhost:4840/gshopcua/server"
-    server_refresh_rate = 1
+    server_refresh_rate = 0.001 
 
-    loop, client = ModbusClient(schedulers.ASYNC_IO, port="COM7",stopbits = 1, timeout=3, bytesize = 8, parity = 'E', baudrate= 19200,method='rtu')
-
-    OpcServerThread(client.protocol,file_path,endpoint,server_refresh_rate,uri)
+    #loop, client = ModbusClient(schedulers.ASYNC_IO, port="COM7",stopbits = 1, bytesize = 8, parity = 'E', baudrate= 19200,method='rtu')
+    client = ModbusClient(method = "rtu", port="COM7",stopbits = 1, bytesize = 8, parity = 'E', baudrate= 19200)
+    OpcServerThread(client,file_path,endpoint,server_refresh_rate,uri)
 
 if __name__ == "__main__":
     main()

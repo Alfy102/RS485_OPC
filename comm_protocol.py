@@ -39,8 +39,7 @@ async def plc_tcp_socket_write(ip_address, port_number,start_device,data_value):
     writer.close()
     return recv_value
 
-async def serial_read_holding_registers(client,unit , start_address, number_of_address):
-    rr = await client.read_holding_registers(start_address, number_of_address, unit=unit)
+def serial_read_holding_registers(client,unit , start_address, number_of_address):
+    rr = client.read_holding_registers(int(start_address), number_of_address, unit=unit)
     response = rr.registers
-    print(response)
     return response
