@@ -10,31 +10,126 @@ import collections
 import time
 from pymodbus.client.asynchronous.serial import (AsyncModbusSerialClient as ModbusClient)
 from pymodbus.client.asynchronous import schedulers
-from comm_protocol import serial_read_holding_registers
-import logging
-logging.basicConfig()
-log = logging.getLogger()
-log.setLevel(logging.DEBUG)
+from comm_protocol import plc_tcp_socket_request
+#io_dict standard dictionary: {variables_id:[device_ip, variables_ns, device_name, category_name,variable_name,0]}
+#hmi_signal standard: (namespace, node_id, data_value)
 
+
+class SubDeviceModeHandler(object):
+    def __init__(self,mode_dict,mode_update):
+        self.device_mode = mode_dict
+        self.mode_update = mode_update
+    async def datachange_notification(self, node, val, data):
+        node_identifier = node.nodeid.Identifier
+        asyncio.create_task(self.mode_update(node_identifier, val))
 
 class OpcServerThread(object):
-    
-    def __init__(self,client,current_file_path,endpoint,server_refresh_rate,uri,parent=None,**kwargs):
-        self.client = client
-        self.plc_address=0x01
+    def __init__(self,plc_address,current_file_path,endpoint,server_refresh_rate,uri,parent=None,**kwargs):
+        self.client = ModbusClient(schedulers.ASYNC_IO, port="COM7",stopbits = 1, timeout=3, bytesize = 8, parity = 'E', baudrate= 19200)
+        self.plc_ip_address=plc_address
         self.file_path = current_file_path
         self.server = Server()
         self.endpoint = endpoint
         self.uri = uri
         self.namespace_index = 0
         self.server_refresh_rate = server_refresh_rate
+        #self.monitored_node = {key:value for key,value in node_structure.items() if value['node_property']['category']=='server_variables'}
         self.plc_clock_dict = {key:value for key,value in node_structure.items() if value['node_property']['category']=='plc_clock'}
+
         #delay of subscribtion time in ms. reducing this value will cause server lag.
         self.sub_time = 50
         self.hmi_sub = 10
         asyncio.run(self.opc_server())
 
+    async def count_node(self,node_id,data_value, data_type):
+        node = self.server.get_node(self.get_node(node_id)) 
+        current_value = await node.read_value()
+        new_value = current_value + data_value
+        asyncio.create_task(self.simple_write_to_opc(node_id, new_value, data_type))
+        return new_value
 
+    def yield_calculation(self,in_value, out_value):
+        if in_value == 0 or out_value==0:
+            total_yield=0.0
+        else:
+            total_yield = (out_value/in_value)*100
+            total_yield = round(total_yield, 2)       
+        return total_yield
+
+    async def mode_update(self,node_id, data_value):
+        node_property = self.mode_dict[node_id]
+        node_property['node_property']['initial_value'] = data_value
+        node_property.update({'flag_time':datetime.now()})
+        self.mode_dict.update({node_id:node_property})
+        for key,value in self.lot_time_dict.items():
+            if value['monitored_node']==node_id:
+                if data_value == True:
+                    node_id = self.get_node(key)
+                    value['node_property']['initial_value']= await node_id.read_value()     
+                self.lot_time_dict.update({key:value})
+        for key,value in self.shift_time_dict.items():
+            if value['monitored_node']==node_id and data_value == True:
+                if data_value == True:
+                    node_id = self.get_node(key)
+                    value['node_property']['initial_value']= await node_id.read_value()         
+                self.lot_time_dict.update({key:value})
+ 
+    def timer_function(self, time_dict):
+        for node_id,value in time_dict.items():
+            corr_flag_node = value['monitored_node']
+            if corr_flag_node != None:
+                device_mode = self.mode_dict[corr_flag_node]['node_property']['initial_value']
+                if device_mode == True:
+                    data_type = value['node_property']['data_type']
+                    flag_time = self.mode_dict[corr_flag_node]['flag_time']
+                    delta_time = self.convert_string_to_time(value['node_property']['initial_value'])
+                    duration = self.duration(flag_time, delta_time)
+                    asyncio.create_task(self.simple_write_to_opc(node_id,duration,data_type))
+    
+    async def system_uptime(self):    
+        lot_start_node = self.get_node(10054)
+        lot_start_datetime = await lot_start_node.read_value()
+        if lot_start_datetime != 'Null':
+            uptime = self.uptime(lot_start_datetime)
+            uptime = str(uptime).split('.')[0]
+            asyncio.create_task(self.simple_write_to_opc(10044, uptime, 'String')) #write to lot_uptime
+
+        shift_start_node = self.get_node(10055)
+        shift_start_datetime = await shift_start_node.read_value()
+        if shift_start_datetime != 'Null':
+            uptime = self.uptime(shift_start_datetime)
+            uptime = str(uptime).split('.')[0]
+            asyncio.create_task(self.simple_write_to_opc(10040, uptime, 'String')) #write to shift_uptime
+
+    def duration(self,start_time, delta_time):
+        if isinstance(start_time, str):
+            start_time = self.convert_string_to_time(start_time)
+        if isinstance(delta_time, str):
+            delta_time = self.convert_string_to_time(delta_time)
+        duration = datetime.now() - start_time + delta_time
+        return duration
+
+    def uptime(self, start_datetime):
+        if isinstance(start_datetime, str):
+                start_time = self.convert_string_to_datetime(start_datetime)
+        uptime = datetime.now() - start_time
+        return uptime
+
+
+    def convert_string_to_datetime(self,time_string):
+        try:
+            date_time = datetime.strptime(time_string,"%d.%m.%Y %H:%M:%S")
+        except:
+            date_time = datetime.strptime(time_string,"%d.%m.%Y %H:%M")
+        return date_time
+
+    def convert_string_to_time(self,time_string):
+        try:
+            delta_time = datetime.strptime(time_string,"%H:%M:%S.%f")
+        except:
+            delta_time = datetime.strptime(time_string,"%H:%M:%S")
+        delta_time = timedelta(hours=delta_time.hour, minutes=delta_time.minute, seconds=delta_time.second, microseconds=delta_time.microsecond)
+        return delta_time
 
     def get_node(self, node_id):
         node =  self.server.get_node(ua.NodeId(node_id, self.namespace_index))
@@ -83,11 +178,12 @@ class OpcServerThread(object):
             dbcur.close()
             return False
 
+
     async def scan_loop_plc(self,io_dict):
         lead_data = io_dict[list(io_dict.keys())[0]]
         lead_device = lead_data['name']
         device_size = len(io_dict)
-        current_relay_list = await serial_read_holding_registers(self.client,self.plc_address,lead_device,device_size)
+        current_relay_list = await plc_tcp_socket_request(self.plc_ip_address,self.port_number,lead_device,device_size,'read')
         i=0
         for key,value in io_dict.items():
             node_id = key
@@ -124,7 +220,6 @@ class OpcServerThread(object):
         conn.close()
 
     async def opc_server(self):
-
         database_file = "variable_history.sqlite3"
         #Configure server to use sqlite as history database (default is a simple memory dict)
         self.server.iserver.history_manager.set_storage(HistorySQLite(self.file_path.joinpath(database_file)))
@@ -142,7 +237,6 @@ class OpcServerThread(object):
         
 
         plc_clock_dict = collections.OrderedDict(sorted(self.plc_clock_dict.items()))
-        print(plc_clock_dict)
         async with self.server:
             while True:
                 #tic = time.time()
@@ -153,14 +247,11 @@ class OpcServerThread(object):
 
 def main():
     uri = "PLC_Server"
-
+    plc_address = 1
     file_path = Path(__file__).parent.absolute()
-    endpoint = "localhost:4840/gshopcua/server"
-    server_refresh_rate = 1
-
-    loop, client = ModbusClient(schedulers.ASYNC_IO, port="COM7",stopbits = 1, timeout=3, bytesize = 8, parity = 'E', baudrate= 19200,method='rtu')
-
-    OpcServerThread(client.protocol,file_path,endpoint,server_refresh_rate,uri)
+    endpoint = "localhost:4845/gshopcua/server"
+    server_refresh_rate = 0.1
+    OpcServerThread(plc_address,file_path,endpoint,server_refresh_rate,uri)
 
 if __name__ == "__main__":
     main()
