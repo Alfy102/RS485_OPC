@@ -9,9 +9,8 @@ from io_layout_map import node_structure
 import collections
 import time
 from pymodbus.client.sync import ModbusSerialClient as ModbusClient
-from pymodbus.client.asynchronous import schedulers
 from comm_protocol import serial_read_holding_registers
-from pymodbus.transaction import ModbusRtuFramer
+
 
 
 class OpcServerThread(object):
@@ -83,8 +82,7 @@ class OpcServerThread(object):
         lead_data = io_dict[list(io_dict.keys())[0]]
         lead_device = lead_data['name']
         device_size = len(io_dict)
-        #print(lead_device)
-        #print(device_size)
+
         current_relay_list = serial_read_holding_registers(client,int(lead_device),device_size,self.plc_address)
         #current_memory = client.read_holding_registers(lead_device, device_size, unit=self.plc_address)
         #current_memory = client.read_holding_registers(16397, 6, unit=0x01)
